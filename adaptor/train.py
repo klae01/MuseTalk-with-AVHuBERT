@@ -11,11 +11,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 class WhisperDataset(Dataset):
-    def __init__(self, units_dir, audio_feature_dir, partition):
+    def __init__(
+        self, units_dir, audio_feature_dir, partition, max_token_length: int = None
+    ):
         self.units_dir = units_dir
         self.audio_feature_dir = audio_feature_dir
         self.partition = partition
         self.data = self._parse_units_file()
+        self.max_token_length = max_token_length
+        self.generator = torch.Generator().manual_seed(42)
 
     def _parse_units_file(self):
         data = []
@@ -38,12 +42,25 @@ class WhisperDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
+    def _crop_tokens_and_features(self, tokens, features):
+        start_token_idx = torch.randint(
+            0, len(tokens) - self.max_token_length, (1,), generator=self.generator
+        ).item()
+        end_token_idx = start_token_idx + self.max_token_length
+        tokens = tokens[start_token_idx:end_token_idx]
+        start_feature_idx = start_token_idx * 5
+        end_feature_idx = min((end_token_idx + 3) * 5, len(features))
+        features = features[start_feature_idx:end_feature_idx]
+        return tokens, features
+
     def __getitem__(self, idx):
         item = self.data[idx]
         npy_path = item["npy_path"]
         tokens = item["tokens"]
         features = np.load(npy_path)
         features = features.reshape(-1, features.shape[-1])
+        if self.max_token_length is not None and len(tokens) > self.max_token_length:
+            tokens, features = self._crop_tokens_and_features(tokens, features)
         return tokens, features
 
 
@@ -121,7 +138,7 @@ def train(
             running_l2_loss += l2loss
             running_cosine_similarity += cosine_similarity
 
-            rstep = epoch + i / len(train_dataloader)
+            rstep = epoch * len(train_dataloader) + i
             writer.add_scalar("Loss/Train", loss, rstep)
             writer.add_scalar("Loss/L1_Train", l1loss, rstep)
             writer.add_scalar("Loss/L2_Train", l2loss, rstep)
@@ -140,10 +157,19 @@ def train(
         eval_loss, eval_l1_loss, eval_l2_loss, eval_cosine_similarity = evaluate(
             model, eval_dataloader, device
         )
-        writer.add_scalar("Loss/Eval", eval_loss, epoch)
-        writer.add_scalar("Loss/L1_Eval", eval_l1_loss, epoch)
-        writer.add_scalar("Loss/L2_Eval", eval_l2_loss, epoch)
-        writer.add_scalar("Metric/CosineSimilarity_Eval", eval_cosine_similarity, epoch)
+
+        writer.add_scalars("Loss/Epoch", {"Train": avg_loss, "Eval": eval_loss}, epoch)
+        writer.add_scalars(
+            "Loss/L1_Epoch", {"Train": avg_l1_loss, "Eval": eval_l1_loss}, epoch
+        )
+        writer.add_scalars(
+            "Loss/L2_Epoch", {"Train": avg_l2_loss, "Eval": eval_l2_loss}, epoch
+        )
+        writer.add_scalars(
+            "Metric/CosineSimilarity_Epoch",
+            {"Train": avg_cosine_similarity, "Eval": eval_cosine_similarity},
+            epoch,
+        )
 
     torch.save(model.state_dict(), os.path.join(output_dir, "whisper_cnn.pth"))
     print(f"Model saved to {os.path.join(output_dir, 'whisper_cnn.pth')}")
@@ -203,16 +229,33 @@ if __name__ == "__main__":
     hidden_dim = 512
     num_epochs = 20
     learning_rate = 0.003
-    batch_size = 32
+    batch_size = 128
+    train_max_token_length = 256
+    eval_max_token_length = None
 
     # Create training and evaluation datasets and dataloaders
-    train_dataset = WhisperDataset(units_dir, audio_feature_dir, partition_train)
-    eval_dataset = WhisperDataset(units_dir, audio_feature_dir, partition_eval)
+    train_dataset = WhisperDataset(
+        units_dir, audio_feature_dir, partition_train, train_max_token_length
+    )
+    eval_dataset = WhisperDataset(
+        units_dir, audio_feature_dir, partition_eval, eval_max_token_length
+    )
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        prefetch_factor=2,
+        num_workers=4,
+        generator=torch.Generator().manual_seed(0),
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
+        eval_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        prefetch_factor=2,
+        num_workers=4,
     )
 
     # Initialize model
@@ -222,7 +265,7 @@ if __name__ == "__main__":
     )
 
     # Initialize TensorBoard writer
-    writer = SummaryWriter(output_dir)
+    writer = SummaryWriter()
 
     # Train model
     train(
