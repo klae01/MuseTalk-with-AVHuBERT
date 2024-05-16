@@ -171,6 +171,7 @@ def train(
             epoch,
         )
 
+        os.makedirs(output_dir, exist_ok=True)
         save_path = os.path.join(output_dir, f"whisper_cnn_{epoch:04d}.pth")
         torch.save(model.state_dict(), save_path)
         print(f"Model saved to {save_path}")
