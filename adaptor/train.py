@@ -105,7 +105,7 @@ def train(
             l2loss = (diff.square() * mask.unsqueeze(-1)).mean() / scale
             l1loss = (diff.abs() * mask.unsqueeze(-1)).mean() / scale
             cosine_similarity = F.cosine_similarity(outputs[slices], features, dim=-1)
-            cosine_similarity = cosine_similarity[mask].mean() / scale
+            cosine_similarity = cosine_similarity[mask].mean()
 
             loss = l1loss * 0.1 + l2loss
             loss.backward()
