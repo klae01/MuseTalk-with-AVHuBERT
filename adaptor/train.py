@@ -171,8 +171,9 @@ def train(
             epoch,
         )
 
-    torch.save(model.state_dict(), os.path.join(output_dir, "whisper_cnn.pth"))
-    print(f"Model saved to {os.path.join(output_dir, 'whisper_cnn.pth')}")
+        save_path = os.path.join(output_dir, f"whisper_cnn_{epoch:04d}.pth")
+        torch.save(model.state_dict(), save_path)
+        print(f"Model saved to {save_path}")
 
 
 def evaluate(model, dataloader, device):
@@ -260,9 +261,8 @@ if __name__ == "__main__":
 
     # Initialize model
     output_dim = train_dataset[0][1].shape[-1]  # Set appropriate output dimension
-    model = WhisperCNN(num_tokens, embedding_dim, hidden_dim, output_dim, 5, 5).to(
-        device
-    )
+    model = WhisperCNN(num_tokens, embedding_dim, hidden_dim, output_dim, 5, 5)
+    model.to(device)
 
     # Initialize TensorBoard writer
     writer = SummaryWriter()
