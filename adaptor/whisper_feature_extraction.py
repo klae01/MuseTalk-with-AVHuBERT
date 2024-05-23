@@ -7,7 +7,6 @@ import time
 from argparse import Namespace
 
 import cv2
-
 # import imageio
 import ffmpeg
 import gdown
@@ -15,7 +14,6 @@ import numpy as np
 import requests
 import torch
 import tqdm
-
 # from moviepy.editor import *
 from huggingface_hub import snapshot_download
 

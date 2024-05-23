@@ -116,6 +116,12 @@ def train(
 
             optimizer.zero_grad()
 
+            tokens[
+                torch.rand_like(tokens, dtype=torch.float16)
+                < torch.rand_like(tokens[:, :1], dtype=torch.float16)
+                * (args.drop_token_max - args.drop_token_min)
+                + args.drop_token_min
+            ] = 0
             outputs = model(tokens)
             slices = tuple(slice(None, s) for s in features.shape)
             diff = outputs[slices] - features
@@ -220,49 +226,70 @@ def evaluate(model, dataloader, device):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if __name__ == "__main__":
-    # Training parameters
-    partition_train = ["short-pretrain"]
-    partition_eval = ["trainval"]
-    units_dir = "/mnt/hard3/rhs/intern/av_unit/"
-    audio_feature_dir = "/mnt/hard3/rhs/intern/audio_feature"
-    output_dir = "./model_output"
-    num_tokens = 1001  # Set appropriate number of tokens
-    embedding_dim = 128
-    hidden_dim = 512
-    num_epochs = 20
-    learning_rate = 0.003
-    batch_size = 128
-    train_max_token_length = 256
-    eval_max_token_length = None
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--units_dir", type=str, required=True)
+    parser.add_argument("--audio_feature_dir", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--partition_train", type=str, nargs="+", required=True)
+    parser.add_argument("--partition_eval", type=str, nargs="+", required=True)
+    parser.add_argument("--num_tokens", type=int, default=1001)
+    parser.add_argument("--embedding_dim", type=int, default=128)
+    parser.add_argument("--hidden_dim", type=int, default=512)
+    parser.add_argument("--num_epochs", type=int, default=20)
+    parser.add_argument("--learning_rate", type=float, default=0.003)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--train_max_token_length", type=int, default=256)
+    parser.add_argument("--eval_max_token_length", type=int, default=None)
+    parser.add_argument("--drop_token_min", type=float, default=0.0)
+    parser.add_argument("--drop_token_max", type=float, default=0.0)
+    parser.add_argument("--num_groups", type=int, default=1)
+    args = parser.parse_args()
 
     # Create training and evaluation datasets and dataloaders
     train_dataset = WhisperDataset(
-        units_dir, audio_feature_dir, partition_train, train_max_token_length
+        args.units_dir,
+        args.audio_feature_dir,
+        args.partition_train,
+        args.train_max_token_length,
     )
     eval_dataset = WhisperDataset(
-        units_dir, audio_feature_dir, partition_eval, eval_max_token_length
+        args.units_dir,
+        args.audio_feature_dir,
+        args.partition_eval,
+        args.eval_max_token_length,
     )
+
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
         prefetch_factor=2,
-        num_workers=4,
-        generator=torch.Generator().manual_seed(0),
+        num_workers=16,
     )
     eval_dataloader = DataLoader(
         eval_dataset,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
         prefetch_factor=2,
-        num_workers=4,
+        num_workers=16,
     )
 
     # Initialize model
     output_dim = train_dataset[0][1].shape[-1]  # Set appropriate output dimension
-    model = WhisperCNN(num_tokens, embedding_dim, hidden_dim, output_dim, 5, 5)
+    model = WhisperCNN(
+        args.num_tokens,
+        args.embedding_dim,
+        args.hidden_dim,
+        output_dim,
+        5,
+        5,
+        args.num_groups,
+    )
+    model = torch.nn.DataParallel(model)
     model.to(device)
 
     # Initialize TensorBoard writer
@@ -273,10 +300,10 @@ if __name__ == "__main__":
         model,
         train_dataloader,
         eval_dataloader,
-        num_epochs,
-        learning_rate,
+        args.num_epochs,
+        args.learning_rate,
         device,
-        output_dir,
+        args.output_dir,
         writer,
     )
 
