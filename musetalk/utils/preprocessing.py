@@ -1,16 +1,19 @@
-import sys
-from face_detection import FaceAlignment,LandmarksType
-from os import listdir, path
-import subprocess
-import numpy as np
-import cv2
-import pickle
-import os
+import itertools
 import json
+import os
+import pickle
+import subprocess
+import sys
+from os import listdir, path
+
+import cv2
+import numpy as np
+import torch
 from mmpose.apis import inference_topdown, init_model
 from mmpose.structures import merge_data_samples
-import torch
 from tqdm import tqdm
+
+from .face_detection import FaceAlignment, LandmarksType
 
 # initialize the mmpose model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,9 +43,8 @@ def read_imgs(img_list):
         frames.append(frame)
     return frames
 
-def get_bbox_range(img_list,upperbondrange =0):
+def get_bbox_range(img_list,upperbondrange =0, batch_size_fa=1):
     frames = read_imgs(img_list)
-    batch_size_fa = 1
     batches = [frames[i:i + batch_size_fa] for i in range(0, len(frames), batch_size_fa)]
     coords_list = []
     landmarks = []
@@ -81,9 +83,8 @@ def get_bbox_range(img_list,upperbondrange =0):
     return text_range
     
 
-def get_landmark_and_bbox(img_list,upperbondrange =0):
+def get_landmark_and_bbox(img_list,upperbondrange =0, batch_size_fa=1):
     frames = read_imgs(img_list)
-    batch_size_fa = 1
     batches = [frames[i:i + batch_size_fa] for i in range(0, len(frames), batch_size_fa)]
     coords_list = []
     landmarks = []
@@ -134,7 +135,55 @@ def get_landmark_and_bbox(img_list,upperbondrange =0):
     print(f"Total frame:「{len(frames)}」 Manually adjust range : [ -{int(sum(average_range_minus) / len(average_range_minus))}~{int(sum(average_range_plus) / len(average_range_plus))} ] , the current value: {upperbondrange}")
     print("*************************************************************************************************************************************")
     return coords_list,frames
-    
+
+
+def batch(iterable, n=1):
+    it = iter(iterable)
+    while True:
+        chunk = list(itertools.islice(it, n))
+        if not chunk:
+            break
+        yield chunk
+
+
+def get_landmark_and_bbox_iter(frames, upperbondrange=0, batch_size_fa=1):
+    for fb in tqdm(batch(frames, batch_size_fa)):
+        results = inference_topdown(model, np.asarray(fb)[0])
+        results = merge_data_samples(results)
+        keypoints = results.pred_instances.keypoints
+        face_land_mark = keypoints[0][23:91]
+        face_land_mark = face_land_mark.astype(np.int32)
+
+        # get bounding boxes by face detetion
+        bbox = fa.get_detections_for_batch(np.asarray(fb))
+
+        # adjust the bounding box refer to landmark
+        # Add the bounding box to a tuple and append it to the coordinates list
+        for j, f in enumerate(bbox):
+            if f is None:  # no face in the image
+                yield coord_placeholder
+                continue
+
+            half_face_coord = face_land_mark[29]
+            if upperbondrange != 0:
+                half_face_coord[1] = upperbondrange + half_face_coord[1]
+            half_face_dist = np.max(face_land_mark[:, 1]) - half_face_coord[1]
+            upper_bond = half_face_coord[1] - half_face_dist
+
+            f_landmark = (
+                np.min(face_land_mark[:, 0]),
+                int(upper_bond),
+                np.max(face_land_mark[:, 0]),
+                np.max(face_land_mark[:, 1]),
+            )
+            x1, y1, x2, y2 = f_landmark
+
+            if (
+                y2 - y1 <= 0 or x2 - x1 <= 0 or x1 < 0
+            ):  # if the landmark bbox is not suitable, reuse the bbox
+                yield f
+            else:
+                yield f
 
 if __name__ == "__main__":
     img_list = ["./results/lyria/00000.png","./results/lyria/00001.png","./results/lyria/00002.png","./results/lyria/00003.png"]

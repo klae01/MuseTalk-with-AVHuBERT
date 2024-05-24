@@ -1,4 +1,6 @@
+import itertools
 import os
+
 import cv2
 import numpy as np
 import torch
@@ -11,9 +13,10 @@ elif ffmpeg_path not in os.getenv('PATH'):
     os.environ["PATH"] = f"{ffmpeg_path}:{os.environ['PATH']}"
 
     
-from musetalk.whisper.audio2feature import Audio2Feature
+from musetalk.models.unet import PositionalEncoding, UNet
 from musetalk.models.vae import VAE
-from musetalk.models.unet import UNet,PositionalEncoding
+from musetalk.whisper.audio2feature import Audio2Feature
+
 
 def load_all_model():
     audio_processor = Audio2Feature(model_path="./models/whisper/tiny.pt")
@@ -47,6 +50,27 @@ def datagen(whisper_chunks,
     for i, w in enumerate(whisper_chunks):
         idx = (i+delay_frame)%len(vae_encode_latents)
         latent = vae_encode_latents[idx]
+        whisper_batch.append(w)
+        latent_batch.append(latent)
+
+        if len(latent_batch) >= batch_size:
+            whisper_batch = np.stack(whisper_batch)
+            latent_batch = torch.cat(latent_batch, dim=0)
+            yield whisper_batch, latent_batch
+            whisper_batch, latent_batch = [], []
+
+    # the last batch may smaller than batch size
+    if len(latent_batch) > 0:
+        whisper_batch = np.stack(whisper_batch)
+        latent_batch = torch.cat(latent_batch, dim=0)
+
+        yield whisper_batch, latent_batch
+
+def datagen_iter(whisper_chunks, vae_encode_latents_iter, batch_size=8, delay_frame=0):
+    whisper_batch, latent_batch = [], []
+    vae_iter = iter(vae_encode_latents_iter)
+    itertools.islice(vae_iter, delay_frame)
+    for w, latent in zip(whisper_chunks, vae_iter):
         whisper_batch.append(w)
         latent_batch.append(latent)
 
