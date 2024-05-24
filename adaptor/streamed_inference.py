@@ -1,6 +1,6 @@
 import glob
 import os
-import shutil
+import tempfile
 
 import cv2
 import imageio
@@ -31,10 +31,6 @@ class AVHubertInference:
         self.model_path_whisper_cnn = os.path.join(
             CheckpointsDir, "whisper_cnn_0019.pth"
         )
-        self.audio_processor, self.vae, self.unet, self.pe = load_all_model()
-        self.timesteps = torch.tensor([0], device=self.device)
-
-        self.initialize_model()
 
     def remove_module_prefix(self, state_dict):
         new_state_dict = {}
@@ -45,7 +41,11 @@ class AVHubertInference:
                 new_state_dict[k] = v
         return new_state_dict
 
-    def initialize_model(self):
+    def initialize_backbone_model(self):
+        self.audio_processor, self.vae, self.unet, self.pe = load_all_model()
+        self.timesteps = torch.tensor([0], device=self.device)
+
+    def initialize_bridge_model(self):
         self.avhubert_processor = AVSpeechToUnitExtractor(
             self.model_path_avhubert, torch.cuda.is_available()
         )
@@ -54,22 +54,14 @@ class AVHubertInference:
         self.avhubert_to_whisper.load_state_dict(state_dict, strict=True)
         self.avhubert_to_whisper.to(self.device)
 
-    def extract_frames(self, video_path, result_dir, input_basename):
-        # Use a temporary directory to avoid conflicts
-        temp_dir = os.path.join(result_dir, f"{input_basename}_frames")
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir, exist_ok=True)
-
-        result_img_save_path = os.path.join(result_dir, input_basename)
-        os.makedirs(result_img_save_path, exist_ok=True)
-
+    def extract_frames(self, video_path, result_dir):
         if get_file_type(video_path) == "video":
             reader = imageio.get_reader(video_path)
             for i, im in enumerate(reader):
-                imageio.imwrite(f"{temp_dir}/{i:08d}.png", im)
+                img_path = os.path.join(result_dir, f"{i:08d}.png")
+                imageio.imwrite(img_path, im)
             input_img_list = sorted(
-                glob.glob(os.path.join(temp_dir, "*.[jpJP][pnPN]*[gG]"))
+                glob.glob(os.path.join(result_dir, "*.[jpJP][pnPN]*[gG]"))
             )
             fps = get_video_fps(video_path)
         else:
@@ -77,7 +69,7 @@ class AVHubertInference:
                 glob.glob(os.path.join(video_path, "*.[jpJP][pnPN]*[gG]"))
             )
             fps = 25
-        return input_img_list, fps, result_img_save_path
+        return input_img_list, fps
 
     @torch.no_grad()
     def extract_audio_features(self, audio_path, fps):
@@ -154,33 +146,34 @@ class AVHubertInference:
                 (x2 - x1, y2 - y1),
                 interpolation=cv2.INTER_AREA,
             )
-            combine_frame = get_image(ori_frame, res_frame, bbox)
+            combine_frame = ori_frame.copy()
+            combine_frame[y1:y2, x1:x2] = res_frame
             cv2.imwrite(f"{result_img_save_path}/{str(i).zfill(8)}.png", combine_frame)
 
     def create_video(self, result_img_save_path, fps, audio_path, output_vid_name):
-        output_video = "temp.mp4"
-        images = [
-            imageio.imread(f"{result_img_save_path}/{file}")
-            for file in sorted(os.listdir(result_img_save_path))
-            if file.endswith(".png")
-        ]
-        imageio.mimwrite(
-            output_video,
-            images,
-            "FFMPEG",
-            fps=fps,
-            codec="libx264",
-            pixelformat="yuv420p",
-        )
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmpfile:
+            output_video = tmpfile.name
+            images = [
+                imageio.imread(f"{result_img_save_path}/{file}")
+                for file in sorted(os.listdir(result_img_save_path))
+                if file.endswith(".png")
+            ]
+            imageio.mimwrite(
+                output_video,
+                images,
+                "FFMPEG",
+                fps=fps,
+                codec="libx264",
+                pixelformat="yuv420p",
+            )
 
-        video_clip = VideoFileClip(output_video)
-        audio_clip = AudioFileClip(audio_path)
-        video_clip = video_clip.set_audio(audio_clip)
-        video_clip.write_videofile(
-            output_vid_name, codec="libx264", audio_codec="aac", fps=25
-        )
-
-        os.remove("temp.mp4")
+            video_clip = VideoFileClip(output_video)
+            audio_clip = AudioFileClip(audio_path)
+            video_clip = video_clip.set_audio(audio_clip)
+            video_clip.write_videofile(
+                output_vid_name, codec="libx264", audio_codec="aac", fps=fps
+            )
+            video_clip.close()
         print(f"Result saved to {output_vid_name}")
 
     def run_pipeline(self, audio_path, video_path, bbox_shift=0):
@@ -189,23 +182,26 @@ class AVHubertInference:
         audio_basename = os.path.basename(audio_path).split(".")[0]
         output_basename = f"{input_basename}_{audio_basename}"
         output_vid_name = os.path.join(result_dir, output_basename + ".mp4")
+        result_img_save_path = os.path.join(result_dir, input_basename)
+        os.makedirs(result_img_save_path, exist_ok=True)
 
-        input_img_list, fps, result_img_save_path = self.extract_frames(
-            video_path, result_dir, input_basename
-        )
-        whisper_chunks = self.extract_audio_features(audio_path, fps)
-        coord_list, frame_list, input_latent_list = self.preprocess_images(
-            input_img_list, bbox_shift
-        )
-        res_frame_list, frame_list_cycle, coord_list_cycle = self.run_inference(
-            whisper_chunks, input_latent_list, frame_list, coord_list
-        )
-        self.postprocess_images(
-            res_frame_list, frame_list_cycle, coord_list_cycle, result_img_save_path
-        )
-        self.create_video(result_img_save_path, fps, audio_path, output_vid_name)
+        with tempfile.TemporaryDirectory() as frame_dir:
+            input_img_list, fps = self.extract_frames(video_path, frame_dir)
+            whisper_chunks = self.extract_audio_features(audio_path, fps)
+            coord_list, frame_list, input_latent_list = self.preprocess_images(
+                input_img_list, bbox_shift
+            )
+            res_frame_list, frame_list_cycle, coord_list_cycle = self.run_inference(
+                whisper_chunks, input_latent_list, frame_list, coord_list
+            )
+            self.postprocess_images(
+                res_frame_list, frame_list_cycle, coord_list_cycle, result_img_save_path
+            )
+            self.create_video(result_img_save_path, fps, audio_path, output_vid_name)
 
 
 # Usage example:
 # avhubert_inference = AVHubertInference()
+# avhubert_inference.initialize_backbone_model()
+# avhubert_inference.initialize_bridge_model()
 # avhubert_inference.run_pipeline("path_to_audio.mp3", "path_to_video.mp4", 0)
