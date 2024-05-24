@@ -134,9 +134,7 @@ class AVHubertInference:
             res_frame_list.extend(recon)
         return res_frame_list, frame_list_cycle, coord_list_cycle
 
-    def postprocess_images(
-        self, res_frame_list, frame_list_cycle, coord_list_cycle, result_img_save_path
-    ):
+    def postprocess_images(self, res_frame_list, frame_list_cycle, coord_list_cycle):
         for i, res_frame in enumerate(res_frame_list):
             bbox = coord_list_cycle[i % len(coord_list_cycle)]
             ori_frame = frame_list_cycle[i % len(frame_list_cycle)]
@@ -148,19 +146,14 @@ class AVHubertInference:
             )
             combine_frame = ori_frame.copy()
             combine_frame[y1:y2, x1:x2] = res_frame
-            cv2.imwrite(f"{result_img_save_path}/{str(i).zfill(8)}.png", combine_frame)
+            yield combine_frame
 
-    def create_video(self, result_img_save_path, fps, audio_path, output_vid_name):
+    def create_video(self, result_images, fps, audio_path, output_vid_name):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmpfile:
             output_video = tmpfile.name
-            images = [
-                imageio.imread(f"{result_img_save_path}/{file}")
-                for file in sorted(os.listdir(result_img_save_path))
-                if file.endswith(".png")
-            ]
             imageio.mimwrite(
                 output_video,
-                images,
+                result_images,
                 "FFMPEG",
                 fps=fps,
                 codec="libx264",
@@ -182,8 +175,6 @@ class AVHubertInference:
         audio_basename = os.path.basename(audio_path).split(".")[0]
         output_basename = f"{input_basename}_{audio_basename}"
         output_vid_name = os.path.join(result_dir, output_basename + ".mp4")
-        result_img_save_path = os.path.join(result_dir, input_basename)
-        os.makedirs(result_img_save_path, exist_ok=True)
 
         with tempfile.TemporaryDirectory() as frame_dir:
             input_img_list, fps = self.extract_frames(video_path, frame_dir)
@@ -194,10 +185,10 @@ class AVHubertInference:
             res_frame_list, frame_list_cycle, coord_list_cycle = self.run_inference(
                 whisper_chunks, input_latent_list, frame_list, coord_list
             )
-            self.postprocess_images(
-                res_frame_list, frame_list_cycle, coord_list_cycle, result_img_save_path
+            result_image_iter = self.postprocess_images(
+                res_frame_list, frame_list_cycle, coord_list_cycle
             )
-            self.create_video(result_img_save_path, fps, audio_path, output_vid_name)
+            self.create_video(list(result_image_iter), fps, audio_path, output_vid_name)
 
 
 # Usage example:
